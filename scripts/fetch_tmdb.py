@@ -77,7 +77,7 @@ def run_tmdb(only=None):
     load_env()
     api_key = os.environ.get('TMDB_API_KEY', '').strip()
     if not api_key:
-        print('TMDB_API_KEY not set: skipping TMDB (QLever fallback will be used).')
+        print('TMDB_API_KEY not set: using QLever fallback.')
         return False
     targets = set(only) if only else {'film', 'serie', 'attori', 'registi'}
     if 'film' in targets:

@@ -1,6 +1,7 @@
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from common import save_category
@@ -72,7 +73,7 @@ QUERIES = {
     'disney': (
         'VALUES ?co { wd:Q1047410 wd:Q127552 wd:Q191224 wd:Q1210936 } ?w wdt:P272 ?co . ?i wdt:P1441 ?w .',
         'OPTIONAL { ?i wdt:P1441 ?w2 . ?w2 rdfs:label ?gl . FILTER(LANG(?gl) = "it") }',
-        600,
+        450,
         False,
     ),
     'citta': (
@@ -125,19 +126,28 @@ QUERIES = {
     ),
 }
 
-def run_sparql(query):
+def run_sparql(query, tries=3):
     data = urllib.parse.urlencode({'query': PREFIXES + query}).encode('utf-8')
-    req = urllib.request.Request(
-        EP,
-        data=data,
-        headers={
-            'User-Agent': UA,
-            'Accept': 'application/sparql-results+json',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-    )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)['results']['bindings']
+    for k in range(tries):
+        try:
+            req = urllib.request.Request(
+                EP,
+                data=data,
+                headers={
+                    'User-Agent': UA,
+                    'Accept': 'application/sparql-results+json',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)['results']['bindings']
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and k + 1 < tries:
+                wait = 5 * (k + 1)
+                print(f'     rate limit (429), retrying in {wait}s...')
+                time.sleep(wait)
+                continue
+            raise
 
 def fetch_one(cat_id):
     print(f'== {cat_id} (QLever)')
@@ -168,7 +178,7 @@ def fetch_one(cat_id):
         if use_occ:
             grp = occ_group(grp)
         items.append((name, grp))
-    time.sleep(0.5)
+    time.sleep(1.2)
     return save_category(cat_id, items)
 
 def run_qlever(cat_ids):
@@ -177,7 +187,8 @@ def run_qlever(cat_ids):
             try:
                 fetch_one(cid)
             except Exception as e:
-                print(f'  !! error on {cid}: {e}')
+                print(f'  !! error on {cid}: {e} (saving curated fallback if present)')
+                save_category(cid, [])
 
 if __name__ == '__main__':
     run_qlever(['giochi', 'calcio', 'musica', 'storici', 'famosi', 'disney', 'citta', 'paesi', 'luoghi', 'mestieri'])
