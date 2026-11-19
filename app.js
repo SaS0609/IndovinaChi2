@@ -122,6 +122,8 @@ let secret = null;
 let crossed = {};
 let notes = '';
 let R = null;
+let connSeq = 0;
+const seenChat = new Set();
 let synced = false;
 let view = [];
 let lastAct = '';
@@ -348,12 +350,23 @@ async function connect() {
     ui.err = 'Impossibile avviare la rete MQTT. Ricarica la pagina o controlla la connessione.';
     return render();
   }
-  const retry = () => setTimeout(() => { if (code && !R) connect(); }, 2500);
+  const seq = ++connSeq;
+  if (R) {
+    try { R.leave(); } catch (e) {}
+    R = null;
+  }
+  const retry = () => setTimeout(() => { if (code && !R && seq === connSeq) connect(); }, 2500);
   try {
-    R = await window.IndovinaNet.join('g-' + code);
+    const joined = await window.IndovinaNet.join('g-' + code);
+    if (seq !== connSeq || !code) {
+      try { joined.leave(); } catch (e) {}
+      return;
+    }
+    R = joined;
     R.on('g', onMsg);
     ui.on = R.connected();
     R.onConnection(c => {
+      if (seq !== connSeq) return;
       ui.on = c;
       net();
       if (c) resync();
@@ -490,7 +503,11 @@ function apply(m) {
       }
       break;
     case 'c':
-      st.log.push({ k: 'c', f, x: m.x });
+      if (m.id) {
+        if (seenChat.has(m.id)) return;
+        seenChat.add(m.id);
+      }
+      st.log.push({ k: 'c', f, x: m.x, id: m.id });
       break;
     case 'rv':
       st.rv[f] = m.s;
@@ -1088,6 +1105,8 @@ function ask(msg, yes, no, yl) {
 }
 
 function leave() {
+  connSeq++;
+  seenChat.clear();
   if (R) {
     send({ t: 'bye' });
     try { R.leave(); } catch (e) {}
@@ -1200,7 +1219,7 @@ app.addEventListener('click', async e => {
     case 'qa': act({ t: 'ans', x: d.x }); break;
     case 'ans': { const x = val('ax'); if (x) act({ t: 'ans', x }); break; }
     case 'ga': act({ t: 'ans', x: d.v === '1' ? 'Sì, giusto! 🎉' : 'No', ok: d.v === '1' }); break;
-    case 'chat': { const x = val('cx'); if (x) act({ t: 'c', x }); break; }
+    case 'chat': { const x = val('cx'); if (x) act({ t: 'c', x, id: me + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) }); break; }
     case 'again': act({ t: 're', rs: serie() ? 1 : 0 }); break;
     case 'back': back(); break;
   }
