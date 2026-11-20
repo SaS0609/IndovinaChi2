@@ -1,4 +1,4 @@
-const CACHE = 'indovina-v2-pwa-2';
+const CACHE = 'indovina-v2-pwa-3';
 const SHELL = [
   './',
   './index.html',

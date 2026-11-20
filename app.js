@@ -4,6 +4,7 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;',
 const norm = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const COL = new Intl.Collator('it');
 const MAX_MSG = 400;
+const AVATARS = ['😎', '🦊', '🐱', '🐶', '🐼', '🦁', '🐸', '🐙', '🦄', '👾', '🤖', '👻', '🧙', '🥷', '🧛', '🤠', '🌟', '🔥'];
 
 const CATS = [];
 const FACET = {
@@ -16,10 +17,54 @@ const FACET = {
 };
 const WIKI_CACHE = {};
 
-const facet = c => FACET[c.k] || (c.custom || c.tmp ? 'Gruppo' : 'Filtro');
+function fuzzyMatch(text, query) {
+  if (!query) return true;
+  if (text.includes(query)) return true;
+  const words = text.split(/\s+/);
+  const qTokens = query.split(/\s+/).filter(Boolean);
+  return qTokens.every(qt => {
+    if (text.includes(qt)) return true;
+    let ti = 0;
+    for (let i = 0; i < text.length && ti < qt.length; i++) {
+      if (text[i] === qt[ti]) ti++;
+    }
+    if (ti === qt.length && qt.length >= 3) return true;
+    if (qt.length < 4) return false;
+    const maxErr = qt.length >= 7 ? 2 : 1;
+    return words.some(w => {
+      if (Math.abs(w.length - qt.length) > maxErr) return false;
+      let prev = Array.from({ length: qt.length + 1 }, (_, i) => i);
+      for (let i = 1; i <= w.length; i++) {
+        const cur = [i];
+        for (let j = 1; j <= qt.length; j++) {
+          cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (w[i - 1] === qt[j - 1] ? 0 : 1));
+        }
+        prev = cur;
+      }
+      return prev[qt.length] <= maxErr;
+    });
+  });
+}
+
+const facet = c => (c && c.mix) ? 'Categoria' : (FACET[c.k] || (c.custom || c.tmp ? 'Gruppo' : 'Filtro'));
 
 function lst(c) {
   if (!c) return [];
+  if (c.mix) {
+    const seen = new Map();
+    const l = [];
+    for (const k of c.mix) {
+      const sub = CATS.find(x => x.k === k);
+      if (!sub) continue;
+      for (const it of lst(sub)) {
+        const x = norm(it.n).replace(/[^a-z0-9]+/g, '');
+        if (!x || seen.has(x)) continue;
+        seen.set(x, 1);
+        l.push({ e: it.e, n: it.n, s: it.s, g: sub.n });
+      }
+    }
+    return l.sort((a, b) => COL.compare(a.n, b.n));
+  }
   if (!c.list) {
     const seen = new Map();
     const l = [];
@@ -51,10 +96,12 @@ function lst(c) {
 
 function groups(c) {
   if (!c) return [];
-  if (!c.gl) {
+  if (c.mix || !c.gl) {
     const m = new Map();
     for (const i of lst(c)) if (i.g) m.set(i.g, (m.get(i.g) || 0) + 1);
-    c.gl = m.size > 1 ? [...m].sort((a, b) => b[1] - a[1] || COL.compare(a[0], b[0])) : [];
+    const gl = m.size > 1 ? [...m].sort((a, b) => b[1] - a[1] || COL.compare(a[0], b[0])) : [];
+    if (!c.mix) c.gl = gl;
+    return gl;
   }
   return c.gl;
 }
@@ -87,7 +134,17 @@ async function loadIndex() {
 }
 
 async function ensureCat(c) {
-  if (!c || !c.json || c.loaded || c.loading) return;
+  if (!c) return;
+  if (c.mix) {
+    await Promise.all(c.mix.map(k => ensureCat(CATS.find(x => x.k === k))));
+    if (app.dataset.s === 'lobby') {
+      const gfr = $('#gfr');
+      if (gfr) gfr.innerHTML = gbtn();
+      drawList();
+    }
+    return;
+  }
+  if (!c.json || c.loaded || c.loading) return;
   c.loading = 1;
   if (app.dataset.s === 'lobby') drawList();
   try {
@@ -115,11 +172,13 @@ async function ensureCat(c) {
 const SEQ = new Set(['go', 'ask', 'ans', 're', 'cat']);
 let me = Math.random().toString(36).slice(2, 9);
 let name = '';
+let avatar = '';
 let code = location.hash.slice(1).toLowerCase();
 let host = false;
 let st = null;
 let secret = null;
 let crossed = {};
+let undoStack = [];
 let notes = '';
 let R = null;
 let connSeq = 0;
@@ -132,10 +191,33 @@ let lastTy = 0;
 let flashT = 0;
 let audioCtx = null;
 
-const ui = { q: '', g: '', dr: null, dx: '', asc: true, mode: 'q', err: '', conn: false, on: true, idxLoaded: false, idxErr: '' };
-try { name = localStorage.getItem('nm') || ''; } catch (e) {}
+const ui = {
+  q: '', g: '', dr: null, dx: '', asc: true, mode: 'q', err: '',
+  conn: false, on: true, idxLoaded: false, idxErr: '',
+  blurSec: false, quote: null, pres: {}
+};
 
-const cat = () => CATS.find(c => c.k === st.cat) || (st.cn ? { k: st.cat, n: st.cn.n, e: st.cn.e, raw: [''], list: [], tmp: 1, wait: 1 } : { k: st.cat, n: st.cat, e: '🎯', raw: [], json: 1 });
+try {
+  name = localStorage.getItem('nm') || '';
+  avatar = localStorage.getItem('av') || '';
+} catch (e) {}
+
+function cat() {
+  if (!st) return CATS[0];
+  if (st.cats && st.cats.length > 1) {
+    const parts = st.cats.map(k => CATS.find(c => c.k === k)).filter(Boolean);
+    const loading = parts.some(p => p.loading || (p.json && !p.loaded));
+    return {
+      k: 'mix',
+      n: parts.length ? parts.map(p => p.n).slice(0, 2).join(' + ') + (parts.length > 2 ? ` +${parts.length - 2}` : '') : 'Mix',
+      e: '🔀',
+      mix: st.cats,
+      loading
+    };
+  }
+  return CATS.find(c => c.k === st.cat) || (st.cn ? { k: st.cat, n: st.cn.n, e: st.cn.e, raw: [''], list: [], tmp: 1, wait: 1 } : { k: st.cat, n: st.cat, e: '🎯', raw: [], json: 1 });
+}
+
 const cbuf = {};
 try {
   JSON.parse(localStorage.getItem('ind-cc') || '[]').forEach(c => {
@@ -144,11 +226,20 @@ try {
 } catch (e) {}
 
 const pn = id => (st.pl[id] && st.pl[id].n) || '?';
+const pav = id => (st.pl[id] && st.pl[id].av) || (pn(id)[0] || '?').toUpperCase();
 const who = f => f === me ? 'Tu' : pn(f);
 const other = () => st.order.find(i => i !== me);
 const wins = id => (st.sc && st.sc[id]) || 0;
 const need = () => Math.floor((st.bo || 0) / 2) + 1;
 const serie = () => st.bo && st.order.find(i => wins(i) >= need());
+
+function oppPresence() {
+  const o = other();
+  if (!o) return '';
+  const pr = ui.pres[o];
+  if (!pr || Date.now() - pr.t > 18000) return '⚪ Offline';
+  return pr.v ? '🟢 Online' : '🟡 In background';
+}
 
 function toast(t) {
   const d = document.createElement('div');
@@ -205,6 +296,45 @@ function playChime() {
   } catch (e) {}
 }
 
+function launchConfetti() {
+  const cv = document.createElement('canvas');
+  cv.className = 'confetti-cv';
+  cv.width = innerWidth;
+  cv.height = innerHeight;
+  document.body.appendChild(cv);
+  const ctx = cv.getContext('2d');
+  const cols = ['#ff6b4a', '#ffb347', '#2fb67c', '#7c5cff', '#0098d9', '#f0408a'];
+  const ps = Array.from({ length: 85 }, () => ({
+    x: Math.random() * cv.width,
+    y: -20 - Math.random() * cv.height * 0.4,
+    vx: (Math.random() - 0.5) * 4,
+    vy: 2.5 + Math.random() * 4,
+    r: 4 + Math.random() * 5,
+    c: cols[Math.floor(Math.random() * cols.length)],
+    rot: Math.random() * 6.28,
+    vr: (Math.random() - 0.5) * 0.2
+  }));
+  let frames = 0;
+  const step = () => {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    for (const p of ps) {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.06;
+      p.rot += p.vr;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.fillStyle = p.c;
+      ctx.fillRect(-p.r, -p.r * 0.5, p.r * 2, p.r);
+      ctx.restore();
+    }
+    if (++frames < 150) requestAnimationFrame(step);
+    else cv.remove();
+  };
+  requestAnimationFrame(step);
+}
+
 function stopTitleFlash() {
   if (flashT) {
     clearInterval(flashT);
@@ -228,8 +358,12 @@ function notifyTurn(label) {
 
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) stopTitleFlash();
+  if (st && R) send({ t: 'pr', v: document.hidden ? 0 : 1 });
 });
-addEventListener('focus', stopTitleFlash);
+addEventListener('focus', () => {
+  stopTitleFlash();
+  if (st && R) send({ t: 'pr', v: 1 });
+});
 
 function settings() {
   const o = document.createElement('div');
@@ -258,6 +392,53 @@ function settings() {
   document.body.appendChild(o);
 }
 applyTheme();
+
+function openAvatarPicker() {
+  const o = document.createElement('div');
+  o.className = 'ov';
+  o.innerHTML = `<div class="card">
+    <div class="row" style="justify-content:space-between"><b>Scegli avatar</b><button class="ghost sm" data-av="x">✕</button></div>
+    <div class="av-grid">${['', ...AVATARS].map(em => `<button class="av-opt ${avatar === em ? 'on' : ''}" data-av="p" data-e="${em}">${em || '🔤'}</button>`).join('')}</div>
+  </div>`;
+  o.onclick = e => {
+    const b = e.target.closest('[data-av]');
+    if (!b) return;
+    if (b.dataset.av === 'p') {
+      avatar = b.dataset.e;
+      try { localStorage.setItem('av', avatar); } catch (err) {}
+      render();
+    }
+    o.remove();
+  };
+  document.body.appendChild(o);
+}
+
+async function fetchWikiSummary(title) {
+  if (WIKI_CACHE[title] !== undefined) return WIKI_CACHE[title];
+  const fetchLang = async lang => {
+    const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.type === 'disambiguation' || !d.extract ? null : d;
+  };
+  try {
+    let data = await fetchLang('it');
+    if (!data) data = await fetchLang('en');
+    WIKI_CACHE[title] = data;
+    return data;
+  } catch (e) {
+    WIKI_CACHE[title] = null;
+    return null;
+  }
+}
+
+async function hydrateSecretImage(targetObj, onDone) {
+  if (!targetObj || targetObj.img !== undefined) return;
+  const d = await fetchWikiSummary(targetObj.n);
+  targetObj.img = (d && d.thumbnail && d.thumbnail.source) || '';
+  if (onDone) onDone();
+}
 
 function buildSnapLog(log) {
   const qa = [];
@@ -288,11 +469,12 @@ function net() {
 
 function resync() {
   if (!st) {
-    if (!host) send({ t: 'hi', n: name });
+    if (!host) send({ t: 'hi', n: name, av: avatar });
     return;
   }
   if (catLost()) send({ t: 'cq' });
   send({ t: 'sy', v: st.q || 0 });
+  send({ t: 'pr', v: document.hidden ? 0 : 1 });
   if (st.ph === 'lobby' && st.pl[me]) send({ t: 'rd', v: st.pl[me].r });
 }
 window.resync = resync;
@@ -300,6 +482,12 @@ window.resync = resync;
 function onMsg(m) {
   const d = m.data;
   if (m.sameTab || !d || d.f === me) return;
+  ui.pres[d.f] = { v: d.t === 'pr' ? d.v : 1, t: Date.now() };
+  if (d.t === 'pr') {
+    if (app.dataset.s === 'lobby') paintLobby();
+    else if (app.dataset.s === 'game') paintHeader();
+    return;
+  }
   if (d.t === 'ty') { typing(); return; }
   if (d.t === 'cc') { gotChunk(d); return; }
   if (d.t === 'cq') { if (host) shareCat(); return; }
@@ -311,7 +499,7 @@ function onMsg(m) {
   apply(d);
 }
 
-const catLost = () => st && !host && !CATS.some(c => c.k === st.cat);
+const catLost = () => st && !host && !st.cats && !CATS.some(c => c.k === st.cat);
 
 function shareCat() {
   const c = st && CATS.find(k => k.k === st.cat);
@@ -387,15 +575,18 @@ async function connect() {
     hbT = setInterval(() => {
       if (!R || !st) return;
       send({ t: 'sy', v: st.q || 0 });
+      send({ t: 'pr', v: document.hidden ? 0 : 1 });
       if (catLost()) send({ t: 'cq' });
       if (st.ph === 'lobby') {
         if (st.pl[me]) send({ t: 'rd', v: st.pl[me].r });
         if (host) send({ t: 'md', m: st.mode, bo: st.bo });
       }
+      if (app.dataset.s === 'lobby') paintLobby();
+      else if (app.dataset.s === 'game') paintHeader();
     }, 5000);
   }
   if (!host && !synced) {
-    const hi = () => send({ t: 'hi', n: name });
+    const hi = () => send({ t: 'hi', n: name, av: avatar });
     hi();
     const t = setInterval(() => synced ? clearInterval(t) : hi(), 1500);
     setTimeout(() => {
@@ -417,8 +608,10 @@ function apply(m) {
       if (!host || !st) return;
       if (!st.pl[f]) {
         if (st.order.length >= 2) return;
-        st.pl[f] = { n: m.n, r: 0 };
+        st.pl[f] = { n: m.n, av: m.av || '', r: 0 };
         st.order.push(f);
+      } else if (m.av !== undefined) {
+        st.pl[f].av = m.av;
       }
       snap();
       shareCat();
@@ -441,9 +634,11 @@ function apply(m) {
     case 'cat':
       if (f !== st.order[0] || st.ph !== 'lobby') return;
       st.cat = m.k;
+      st.cats = m.cats || null;
       st.cn = m.cn || null;
       secret = null;
       crossed = {};
+      undoStack = [];
       notes = '';
       ui.q = '';
       ui.g = '';
@@ -479,11 +674,12 @@ function apply(m) {
       st.log = [];
       st.pend = null;
       notes = '';
+      ui.quote = null;
       if (st.order[st.turn] === me) notifyTurn('Inizia! Tocca a te');
       break;
     case 'ask':
-      st.pend = { k: m.k, x: m.x, f };
-      st.log.push({ k: m.k, f, x: m.x });
+      st.pend = { k: m.k, x: m.x, f, qt: m.qt || null };
+      st.log.push({ k: m.k, f, x: m.x, qt: m.qt || null });
       if (f !== me) notifyTurn(m.k === 'g' ? 'Tentativo!' : 'Nuova domanda!');
       break;
     case 'ans':
@@ -494,6 +690,7 @@ function apply(m) {
         st.sc = st.sc || {};
         st.sc[st.win] = wins(st.win) + 1;
         if (secret) act({ t: 'rv', s: secret });
+        if (st.win === me) launchConfetti();
         if (f !== me) notifyTurn(st.win === me ? 'Hai vinto!' : 'Partita finita!');
       } else {
         st.pend = null;
@@ -507,10 +704,11 @@ function apply(m) {
         if (seenChat.has(m.id)) return;
         seenChat.add(m.id);
       }
-      st.log.push({ k: 'c', f, x: m.x, id: m.id });
+      st.log.push({ k: 'c', f, x: m.x, id: m.id, qt: m.qt || null });
       break;
     case 'rv':
       st.rv[f] = m.s;
+      if (m.s && m.s.n) hydrateSecretImage(st.rv[f], () => { if (app.dataset.s === 'end') render(); });
       break;
     case 're':
       st.ph = 'lobby';
@@ -520,7 +718,9 @@ function apply(m) {
       st.pend = null;
       secret = null;
       crossed = {};
+      undoStack = [];
       notes = '';
+      ui.quote = null;
       if (m.rs) st.sc = {};
       st.order.forEach(i => { if (st.pl[i]) st.pl[i].r = 0; });
       break;
@@ -530,7 +730,7 @@ function apply(m) {
   refreshScratchpad();
 }
 
-function newGame(k) {
+function newGame(k, mixKeys) {
   name = ($('#nm') || {}).value.trim() || 'Giocatore';
   try { localStorage.setItem('nm', name); } catch (e) {}
   code = Math.random().toString(36).slice(2, 10);
@@ -538,17 +738,20 @@ function newGame(k) {
   synced = true;
   location.hash = code;
   crossed = {};
+  undoStack = [];
   notes = '';
   ui.q = '';
   ui.g = '';
   ui.dr = null;
   ui.dx = '';
-  const cc = CATS.find(c => c.k === k);
+  ui.quote = null;
+  const cc = !mixKeys ? CATS.find(c => c.k === k) : null;
   st = {
-    cat: k,
+    cat: mixKeys ? 'mix' : k,
+    cats: mixKeys || null,
     cn: cc && cc.custom ? { n: cc.n, e: cc.e } : null,
     ph: 'lobby',
-    pl: { [me]: { n: name, r: 0 } },
+    pl: { [me]: { n: name, av: avatar, r: 0 } },
     order: [me],
     turn: 0,
     rd: 1,
@@ -561,7 +764,7 @@ function newGame(k) {
     bo: 0,
     sc: {}
   };
-  ensureCat(cc);
+  ensureCat(cat());
   connect();
   render();
 }
@@ -669,63 +872,100 @@ async function showWikiInfo(title) {
     if (e.target === o || e.target.closest('[data-w="x"]')) o.remove();
   };
   document.body.appendChild(o);
-
-  const renderWiki = data => {
-    const body = o.querySelector('#wk-body');
-    if (!body) return;
-    if (!data) {
-      body.innerHTML = '<p class="wt" style="margin:14px 0">Nessuna descrizione trovata su Wikipedia.</p>';
-      return;
-    }
-    const img = data.thumbnail && data.thumbnail.source ? `<img class="wiki-img" src="${esc(data.thumbnail.source)}" alt="">` : '';
-    const link = data.content_urls && data.content_urls.desktop ? `<a class="wiki-link" href="${esc(data.content_urls.desktop.page)}" target="_blank" rel="noopener">Apri su Wikipedia ↗</a>` : '';
-    body.innerHTML = `${img}<p class="wiki-text">${esc(data.extract || 'Nessun riassunto disponibile.')}</p>${link}`;
-  };
-
-  if (WIKI_CACHE[title] !== undefined) {
-    renderWiki(WIKI_CACHE[title]);
+  const data = await fetchWikiSummary(title);
+  const body = o.querySelector('#wk-body');
+  if (!body) return;
+  if (!data) {
+    body.innerHTML = '<p class="wt" style="margin:14px 0">Nessuna descrizione trovata su Wikipedia.</p>';
     return;
   }
-  const fetchLang = async lang => {
-    const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`;
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    const d = await r.json();
-    return d.type === 'disambiguation' || !d.extract ? null : d;
+  const img = data.thumbnail && data.thumbnail.source ? `<img class="wiki-img" src="${esc(data.thumbnail.source)}" alt="">` : '';
+  const link = data.content_urls && data.content_urls.desktop ? `<a class="wiki-link" href="${esc(data.content_urls.desktop.page)}" target="_blank" rel="noopener">Apri su Wikipedia ↗</a>` : '';
+  body.innerHTML = `${img}<p class="wiki-text">${esc(data.extract || 'Nessun riassunto disponibile.')}</p>${link}`;
+}
+
+function openMixPicker(onPick, initial) {
+  const sel = new Set(initial || []);
+  const o = document.createElement('div');
+  o.className = 'bd';
+  const draw = () => {
+    o.innerHTML = `<div class="top">
+      <button class="ghost sm" data-x="c">✕</button>
+      <b>🔀 Mix categorie (${sel.size})</b>
+      <button class="btn" data-x="go" ${sel.size < 2 ? 'disabled' : ''}>Avvia</button>
+    </div>
+    <div class="page">
+      <p style="margin-bottom:10px;font-size:14px">Seleziona 2 o più categorie da unire nella stessa partita.</p>
+      <div class="grid">${CATS.filter(c => !c.custom && !c.tmp).map(c => `<button class="cat ${sel.has(c.k) ? 'on' : ''}" data-x="t" data-k="${c.k}"><span>${c.e}</span><b>${esc(c.n)}</b><small>${cnt(c)} voci</small></button>`).join('')}</div>
+    </div>`;
   };
-  try {
-    let data = await fetchLang('it');
-    if (!data) data = await fetchLang('en');
-    WIKI_CACHE[title] = data;
-    renderWiki(data);
-  } catch (e) {
-    renderWiki(null);
-  }
+  o.onclick = e => {
+    const b = e.target.closest('[data-x]');
+    if (!b) return;
+    if (b.dataset.x === 'c') { o.remove(); return; }
+    if (b.dataset.x === 't') {
+      const k = b.dataset.k;
+      if (sel.has(k)) sel.delete(k);
+      else sel.add(k);
+      draw();
+    } else if (b.dataset.x === 'go' && sel.size >= 2) {
+      o.remove();
+      onPick([...sel]);
+    }
+  };
+  draw();
+  document.body.appendChild(o);
 }
 
 function openCatSwitcher() {
   if (!host || !st || st.ph !== 'lobby') return;
   const o = document.createElement('div');
   o.className = 'bd';
-  o.innerHTML = `<div class="top"><button class="ghost sm" data-x="c">✕</button><b>🔄 Cambia categoria</b><span></span></div>
-    <div class="page"><div class="grid">${CATS.map(c => `<button class="cat ${c.k === st.cat ? 'on' : ''}" data-x="pick" data-k="${c.k}"><span>${c.e}</span><b>${esc(c.n)}</b><small>${cnt(c)} voci</small></button>`).join('')}</div></div>`;
+  o.innerHTML = `<div class="top">
+      <button class="ghost sm" data-x="c">✕</button>
+      <b>🔄 Cambia categoria</b>
+      <button class="ghost sm" data-x="mix">🔀 Mix</button>
+    </div>
+    <div class="page"><div class="grid">${CATS.map(c => `<button class="cat ${!st.cats && c.k === st.cat ? 'on' : ''}" data-x="pick" data-k="${c.k}"><span>${c.e}</span><b>${esc(c.n)}</b><small>${cnt(c)} voci</small></button>`).join('')}</div></div>`;
   document.body.appendChild(o);
   o.onclick = e => {
     const b = e.target.closest('[data-x]');
     if (!b) return;
     if (b.dataset.x === 'c') { o.remove(); return; }
+    if (b.dataset.x === 'mix') {
+      o.remove();
+      openMixPicker(keys => {
+        act({ t: 'cat', k: 'mix', cats: keys, cn: null });
+      }, st.cats || [st.cat]);
+      return;
+    }
     const k = b.dataset.k;
     o.remove();
-    if (k === st.cat) return;
+    if (!st.cats && k === st.cat) return;
     const cc = CATS.find(c => c.k === k);
-    act({ t: 'cat', k, cn: cc && cc.custom ? { n: cc.n, e: cc.e } : null });
+    act({ t: 'cat', k, cats: null, cn: cc && cc.custom ? { n: cc.n, e: cc.e } : null });
     if (cc && cc.custom) shareCat();
   };
 }
 
+function saveCustomCats() {
+  const mine = CATS.filter(c => c.custom);
+  try { localStorage.setItem('ind-cc', JSON.stringify(mine.map(c => ({ k: c.k, n: c.n, e: c.e, i: c.raw[0] })))); } catch (e) {}
+}
+
+function exportCustomCat(c) {
+  const lines = [c.n, c.e, ...c.raw.join(';').split(';').filter(Boolean)];
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (norm(c.n).replace(/[^a-z0-9]+/g, '-') || 'categoria') + '.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
 const gtxt = () => '🧩 ' + facet(cat()) + ': ' + (ui.g || 'Tutti');
 const gbtn = () => groups(cat()).length ? `<button class="ghost" style="width:100%" data-a="grp">${esc(gtxt())}</button>` : '';
-const nameBox = () => `<div class="card"><label>Il tuo nome</label><input id="nm" maxlength="20" placeholder="Come ti chiami?" value="${esc(name)}"></div>`;
+const nameBox = () => `<div class="card"><label>Il tuo nome e avatar</label><div class="row"><button class="av-btn" data-a="av" title="Scegli avatar">${avatar || '🔤'}</button><input id="nm" maxlength="20" placeholder="Come ti chiami?" value="${esc(name)}"></div></div>`;
 const netBanner = () => `<div class="net-banner"><span>⚠️ Connessione persa</span><button data-a="reconn">Riconnetti</button></div>`;
 
 const V = {
@@ -733,10 +973,13 @@ const V = {
     <div style="display:flex;justify-content:flex-end"><button class="ghost sm" data-a="set">⚙️</button></div>
     <div class="hero" style="padding-top:0"><div class="logo">🔮</div><h1>Indovina!</h1><p>Scegli un segreto, fai domande e scopri quello dell’altro.</p></div>
     ${nameBox()}
-    <h3>Crea una partita</h3>
+    <div class="row" style="justify-content:space-between;margin-top:16px">
+      <h3 style="margin:0 4px">Crea una partita</h3>
+      <button class="ghost sm" data-a="mix">🔀 Mix categorie</button>
+    </div>
     ${ui.idxErr ? `<p class="err">${esc(ui.idxErr)}</p>` : (!ui.idxLoaded && !CATS.length ? '<p class="wt">⏳ Caricamento categorie…</p>' : '')}
-    <div class="grid">${CATS.map(c => `<button class="cat" data-a="new" data-k="${c.k}"><span>${c.e}</span><b>${esc(c.n)}</b><small>${cnt(c)} voci</small></button>`).join('')}</div>
-    <button class="ghost" style="width:100%;margin-top:10px" data-a="cc">＋ Crea categoria personalizzata</button>
+    <div class="grid" style="margin-top:8px">${CATS.map(c => `<button class="cat" data-a="new" data-k="${c.k}"><span>${c.e}</span><b>${esc(c.n)}</b><small>${cnt(c)} voci</small></button>`).join('')}</div>
+    <button class="ghost" style="width:100%;margin-top:10px" data-a="cc">＋ Crea o importa categoria</button>
     <h3>Hai un codice?</h3>
     <div class="row"><input id="cd" maxlength="10" placeholder="Codice invito"><button class="btn" data-a="code">Entra</button></div>
   </div>`,
@@ -760,9 +1003,10 @@ const V = {
     </div>
     <div class="page">
       <div class="card" id="plr"></div>
+      ${c.tmp ? `<button class="ghost" style="width:100%;margin-top:8px" data-a="savetmp">💾 Salva questa categoria tra le tue</button>` : ''}
       <h3>Modalità</h3><div class="card" id="mdr"></div>
       <h3>Il tuo segreto</h3><div id="sel"></div>
-      <div class="row"><input id="q" placeholder="🔍 Cerca…" value="${esc(ui.q)}"><button class="ghost sm" data-a="sort">${ui.asc ? 'A→Z' : 'Z→A'}</button></div>
+      <div class="row"><input id="q" placeholder="🔍 Cerca (anche con errori)…" value="${esc(ui.q)}"><button class="ghost sm" data-a="sort">${ui.asc ? 'A→Z' : 'Z→A'}</button></div>
       <div id="gfr" style="margin-top:8px">${gbtn()}</div>
       <div id="list" class="list"></div>
       <details><summary>＋ Non c’è? Aggiungi il tuo</summary><div class="row"><input id="ce" class="emo" maxlength="4" placeholder="✨"><input id="cn" maxlength="50" placeholder="Nome"><button class="btn" data-a="custom">Ok</button></div></details>
@@ -773,11 +1017,12 @@ const V = {
   game: () => `${netBanner()}<div id="hd" class="top"></div>
     <div id="feed" class="feed"></div>
     <div id="act" class="act"></div>
+    <div id="qtbar"></div>
     <div id="ty" class="ty"></div>
     <div class="chat">
       ${st.mode === 'b' ? '<button class="ghost sm" data-a="board" title="Lista candidati">📋</button>' : ''}
       <button class="ghost sm" data-a="notes" title="Appunti e Q&A">📝</button>
-      <input id="cx" maxlength="${MAX_MSG}" placeholder="💬 Chat libera (non usa il turno)…">
+      <input id="cx" maxlength="${MAX_MSG}" placeholder="💬 Chat libera (tocca un msg per citarlo)…">
       <button class="btn" data-a="chat">➤</button>
     </div>`,
 
@@ -794,9 +1039,10 @@ const V = {
         ${b ? `<p><b>${esc(pn(a))} ${wins(a)} – ${wins(b)} ${esc(pn(b))}</b></p>` : ''}
         ${sw ? `<p>🏅 Serie vinta da <b>${esc(pn(sw))}</b>!</p>` : ''}
       </div>
-      <div class="card" style="display:flex;justify-content:space-around">${st.order.map(id => {
+      <div class="card" style="display:flex;justify-content:space-around;gap:8px">${st.order.map(id => {
         const s = st.rv[id];
-        return `<div class="rv"><small>Segreto di ${id === me ? 'te' : esc(pn(id))}</small><span class="big">${s ? s.e : '❔'}</span><b>${s ? esc(s.n) : '…'}</b></div>`;
+        const media = s && s.img ? `<img class="rv-img" src="${esc(s.img)}" alt="">` : `<span class="big">${s ? s.e : '❔'}</span>`;
+        return `<div class="rv"><small>Segreto di ${id === me ? 'te' : esc(pn(id))}</small>${media}<b>${s ? esc(s.n) : '…'}</b></div>`;
       }).join('')}</div>
       <div style="margin-top:16px"><button class="btn big" data-a="again">${sw ? '🔁 Nuova serie' : '🔁 Rivincita'}</button></div>
       <div style="margin-top:10px"><button class="ghost" style="width:100%" data-a="back">🏠 Torna alla home</button></div>
@@ -837,7 +1083,7 @@ function drawList() {
     ensureCat(c);
     return;
   }
-  view = lst(c).filter(i => (!q || i.s.includes(q)) && (!ui.g || i.g === ui.g));
+  view = lst(c).filter(i => (!q || fuzzyMatch(i.s, q)) && (!ui.g || i.g === ui.g));
   if (!ui.asc) view = view.slice().reverse();
   if (!view.length) {
     if (el._off) el._off();
@@ -855,31 +1101,55 @@ function paintLobby() {
   const h = host ? '' : 'disabled';
   $('#plr').innerHTML = `<div class="pl">${[0, 1].map(i => {
     const id = st.order[i];
-    return id
-      ? `<div class="p"><span class="av">${esc(pn(id)[0] || '?').toUpperCase()}</span><b>${esc(pn(id))}${id === me ? ' (tu)' : ''}</b><i class="dot ${st.pl[id].r ? 'on' : ''}"></i></div>`
-      : `<div class="p wait">⏳ In attesa dell’amico… codice <b>${esc(code)}</b></div>`;
+    if (!id) return `<div class="p wait">⏳ In attesa dell’amico… codice <b>${esc(code)}</b></div>`;
+    const pr = id !== me ? `<span class="pres">${oppPresence()}</span>` : '';
+    return `<div class="p"><span class="av">${esc(pav(id))}</span><div><b>${esc(pn(id))}${id === me ? ' (tu)' : ''}</b>${pr}</div><i class="dot ${st.pl[id].r ? 'on' : ''}"></i></div>`;
   }).join('')}</div>`;
   $('#mdr').innerHTML = `<div class="row" style="flex-wrap:wrap">
       <button class="ghost sm ${st.mode !== 'b' ? 'on' : ''}" data-a="md" data-m="n" ${h}>🎯 Classica</button>
       <button class="ghost sm ${st.mode === 'b' ? 'on' : ''}" data-a="md" data-m="b" ${h}>📋 Con candidati</button>
     </div>
-    <p style="font-size:13px">${st.mode === 'b' ? 'Puoi aprire la lista dei candidati e depennare i nomi (solo per te).' : 'Solo domande, tentativi e blocco appunti automatico.'}</p>
+    <p style="font-size:13px">${st.mode === 'b' ? 'Lista candidati con depennamento rapido per gruppo e suggerimenti smart.' : 'Solo domande, tentativi e blocco appunti automatico.'}</p>
     <div class="row" style="flex-wrap:wrap;margin-top:6px"><small style="font-weight:800">Serie:</small>${[0, 3, 5].map(b => `<button class="ghost sm ${(st.bo || 0) === b ? 'on' : ''}" data-a="bo" data-b="${b}" ${h}>${b ? 'al meglio di ' + b : '∞ partite'}</button>`).join('')}</div>
-    ${host ? '<p style="font-size:12px;margin-top:6px">Tocca il nome della categoria in alto per cambiarla senza uscire dalla stanza.</p>' : '<p style="font-size:13px">Le modalità e la categoria le sceglie chi ha creato la partita.</p>'}`;
-  $('#sel').innerHTML = secret ? `<div class="card sel"><span class="big">${secret.e}</span><b>${esc(secret.n)}</b></div>` : '';
+    ${host ? '<p style="font-size:12px;margin-top:6px">Tocca il nome della categoria in alto per cambiarla o creare un Mix.</p>' : '<p style="font-size:13px">Le modalità e la categoria le sceglie chi ha creato la partita.</p>'}`;
+  if (secret) {
+    const media = secret.img ? `<img class="sec-img" src="${esc(secret.img)}" alt="">` : `<span class="big">${secret.e}</span>`;
+    $('#sel').innerHTML = `<div class="card sel ${ui.blurSec ? 'blur' : ''}" data-a="blur" title="Tocca per nascondere/mostrare">${media}<div><b>${esc(secret.n)}</b><small style="display:block;color:var(--mut)">${ui.blurSec ? '🙈 Tocca per mostrare' : '👁️ Tocca per sfocare'}</small></div></div>`;
+  } else {
+    $('#sel').innerHTML = '';
+  }
   $('#rdb').innerHTML = `<button class="btn big" data-a="ready" ${secret ? '' : 'disabled'}>${r ? 'Annulla: non sono pronto' : 'Sono pronto!'}</button>`;
   const q = $('#q');
   if (q) q.disabled = !!r;
+}
+
+function paintHeader() {
+  const hd = $('#hd');
+  if (!hd || !st) return;
+  const myTurn = st.order[st.turn] === me;
+  hd.innerHTML = `<button class="ghost sm" data-a="back">←</button>
+    <span class="pill">R${st.rd}${st.sc && Object.keys(st.sc).length ? ' · ' + wins(me) + '–' + wins(other()) : ''}</span>
+    <div style="text-align:center;line-height:1.15"><b style="font-size:14px">${myTurn ? '🟢 Tocca a te' : '⏳ ' + esc(pn(st.order[st.turn]))}</b><span class="pres">${oppPresence()}</span></div>
+    <span class="pill sec ${ui.blurSec ? 'blur' : ''}" data-a="blur" title="Tocca per sfocare il segreto">${secret ? secret.e + ' ' + esc(secret.n) : ''}</span>`;
+}
+
+function paintQuoteBar() {
+  const qb = $('#qtbar');
+  if (!qb) return;
+  if (!ui.quote) {
+    qb.innerHTML = '';
+    return;
+  }
+  qb.innerHTML = `<div class="qt-bar"><span>↩️ ${esc(ui.quote.w)}: “${esc(ui.quote.x)}”</span><button class="ghost sm" data-a="noqt">✕</button></div>`;
 }
 
 function paintGame(full) {
   const myTurn = st.order[st.turn] === me;
   const p = st.pend;
   if (!myTurn || p) ui.dr = null;
-  $('#hd').innerHTML = `<button class="ghost sm" data-a="back">←</button>
-    <span class="pill">Round ${st.rd}${st.sc && Object.keys(st.sc).length ? ' · ' + wins(me) + '–' + wins(other()) : ''}</span>
-    <b style="font-size:14px">${myTurn ? '🟢 Tocca a te' : '⏳ ' + esc(pn(st.order[st.turn]))}</b>
-    <span class="pill" title="${secret ? esc(secret.n) : ''}">${secret ? secret.e + ' ' + esc(secret.n) : ''}</span>`;
+  paintHeader();
+  paintQuoteBar();
+
   const cards = [];
   for (const l of st.log) {
     if (l.k === 'c') cards.push(l);
@@ -891,12 +1161,14 @@ function paintGame(full) {
     }
   }
   const fd = $('#feed');
-  fd.innerHTML = cards.map(c => c.k === 'c'
-    ? `<div class="b ${c.f === me ? 'me' : 'you'}"><small>${esc(who(c.f))}</small>${esc(c.x)}</div>`
-    : c.k === 'o'
-      ? `<div class="ev">${esc(c.x)}</div>`
-      : `<div class="qa ${c.f === me ? 'me' : 'you'}"><div class="qq"><small>${esc(who(c.f))} · ${c.k === 'q' ? '❓ Domanda' : '🎯 Tentativo'}</small>${esc(c.x)}</div><div class="qr ${c.a ? (c.a.ok === true ? 'yes' : c.a.ok === false ? 'no' : 'rp') : 'pn'}">${c.a ? esc(c.a.x) : '⏳ In attesa della risposta…'}</div></div>`
-  ).join('') || '<p class="wt" style="margin-top:20px">Nessun messaggio ancora. Buona fortuna! 🍀</p>';
+  fd.innerHTML = cards.map((c, idx) => {
+    const qHtml = c.qt ? `<div class="qt">↩️ ${esc(c.qt.w)}: ${esc(c.qt.x)}</div>` : '';
+    if (c.k === 'c') {
+      return `<div class="b ${c.f === me ? 'me' : 'you'}" data-a="qt" data-w="${esc(who(c.f))}" data-x="${esc(c.x.slice(0, 80))}">${qHtml}<small>${esc(who(c.f))}</small>${esc(c.x)}</div>`;
+    }
+    if (c.k === 'o') return `<div class="ev">${esc(c.x)}</div>`;
+    return `<div class="qa ${c.f === me ? 'me' : 'you'}" data-a="qt" data-w="${esc(who(c.f))}" data-x="${esc(c.x.slice(0, 80))}"><div class="qq">${qHtml}<small>${esc(who(c.f))} · ${c.k === 'q' ? '❓ Domanda' : '🎯 Tentativo'}</small>${esc(c.x)}</div><div class="qr ${c.a ? (c.a.ok === true ? 'yes' : c.a.ok === false ? 'no' : 'rp') : 'pn'}">${c.a ? esc(c.a.x) : '⏳ In attesa della risposta…'}</div></div>`;
+  }).join('') || '<p class="wt" style="margin-top:20px">Nessun messaggio ancora. Buona fortuna! 🍀</p>';
   fd.scrollTop = fd.scrollHeight;
 
   const d = ui.dr;
@@ -930,7 +1202,7 @@ function save() {
     if (st) {
       const t = CATS.find(c => c.tmp && c.k === st.cat);
       localStorage.setItem('ind', JSON.stringify({
-        me, name, code, host, st, secret, cr: crossed, nt: notes,
+        me, name, avatar, code, host, st, secret, cr: crossed, nt: notes,
         cu: t ? { k: t.k, n: t.n, e: t.e, i: t.raw[0] } : null
       }));
     }
@@ -972,7 +1244,7 @@ function groupPicker(c, cur, cb) {
   let v = [];
   const draw = q => {
     const s = norm(q.trim());
-    v = [['', lst(c).length]].concat(G.filter(g => !s || norm(g[0]).includes(s)));
+    v = [['', lst(c).length]].concat(G.filter(g => !s || fuzzyMatch(norm(g[0]), s)));
     fillList(gl, v, (g, x) => `<button class="it ${g[0] === cur ? 's' : ''}" data-x="g" data-i="${x}"><span>${g[0] ? '🧩' : '📚'}</span><b>${esc(g[0] || 'Tutti')}</b><small>${g[1]}</small></button>`);
   };
   o.addEventListener('click', e => {
@@ -991,28 +1263,47 @@ function customCat() {
   const o = document.createElement('div');
   o.className = 'ov';
   const mine = () => CATS.filter(c => c.custom);
-  const store = () => {
-    try { localStorage.setItem('ind-cc', JSON.stringify(mine().map(c => ({ k: c.k, n: c.n, e: c.e, i: c.raw[0] })))); } catch (e) {}
-  };
   const draw = err => {
     o.innerHTML = `<div class="card">
-      <b>📝 Nuova categoria</b>
+      <div class="row" style="justify-content:space-between">
+        <b>📝 Categoria personalizzata</b>
+        <label class="ghost sm" style="margin:0;cursor:pointer">📥 Importa .txt<input id="ucf" type="file" accept=".txt" style="display:none"></label>
+      </div>
       <div class="row" style="margin:10px 0"><input id="uce" class="emo" maxlength="4" placeholder="📝"><input id="ucn" maxlength="30" placeholder="Nome categoria"></div>
-      <textarea id="ucl" rows="8" placeholder="Una voce per riga.&#10;Con emoji davanti: 🍕 Pizza&#10;Con gruppo per i filtri: Pizza | Cibo"></textarea>
+      <textarea id="ucl" rows="7" placeholder="Una voce per riga.&#10;Con emoji davanti: 🍕 Pizza&#10;Con gruppo per i filtri: Pizza | Cibo"></textarea>
       ${err ? `<p class="err">${esc(err)}</p>` : ''}
       <div class="row" style="margin-top:10px"><button class="ghost" style="flex:1" data-u="x">Chiudi</button><button class="btn" style="flex:1" data-u="ok">Crea</button></div>
-      ${mine().length ? '<h3>Le tue categorie</h3>' + mine().map(c => `<div class="row" style="margin:4px 0"><span>${c.e}</span><b style="flex:1">${esc(c.n)}</b><small>${cnt(c)}</small><button class="ghost sm" data-u="del" data-k="${c.k}">🗑</button></div>`).join('') : ''}
+      ${mine().length ? '<h3>Le tue categorie</h3>' + mine().map(c => `<div class="row" style="margin:4px 0"><span>${c.e}</span><b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.n)}</b><small>${cnt(c)}</small><button class="ghost sm" data-u="exp" data-k="${c.k}" title="Esporta .txt">📤</button><button class="ghost sm" data-u="del" data-k="${c.k}" title="Elimina">🗑</button></div>`).join('') : ''}
     </div>`;
   };
+  o.addEventListener('change', async e => {
+    if (e.target.id !== 'ucf' || !e.target.files[0]) return;
+    const txt = await e.target.files[0].text();
+    const lines = txt.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    if (lines.length < 6) return draw('File .txt non valido (servono nome, emoji e almeno 4 voci).');
+    const n = lines[0].slice(0, 30);
+    const em = lines[1].slice(0, 4) || '📝';
+    const raw = lines.slice(2).join(';');
+    CATS.push({ k: 'u-' + Math.random().toString(36).slice(2, 7), n, e: em, raw: [raw], custom: 1 });
+    saveCustomCats();
+    draw();
+    render();
+    toast('Categoria importata!');
+  });
   o.onclick = e => {
     const b = e.target.closest('[data-u]');
     if (!b) return;
     const d = b.dataset.u;
     if (d === 'x') { o.remove(); return; }
+    if (d === 'exp') {
+      const c = CATS.find(x => x.k === b.dataset.k);
+      if (c) exportCustomCat(c);
+      return;
+    }
     if (d === 'del') {
       const i = CATS.findIndex(c => c.k === b.dataset.k);
       if (i >= 0) CATS.splice(i, 1);
-      store();
+      saveCustomCats();
       draw();
       render();
       return;
@@ -1032,7 +1323,7 @@ function customCat() {
     const raw = it.join(';');
     if (raw.length > 24000) return draw('Lista troppo lunga.');
     CATS.push({ k: 'u-' + Math.random().toString(36).slice(2, 7), n, e: em, raw: [raw], custom: 1 });
-    store();
+    saveCustomCats();
     o.remove();
     render();
     toast('Categoria creata!');
@@ -1041,42 +1332,128 @@ function customCat() {
   document.body.appendChild(o);
 }
 
+function getSmartSuggestions(L, G) {
+  const suggs = [];
+  const seen = new Set();
+  const pairs = getQaPairs().filter(p => p.f === me && p.a);
+  for (const p of pairs) {
+    const qn = norm(p.q);
+    const isYes = p.a.ok === true || /^s[iì]\b/i.test(p.a.x);
+    const isNo = p.a.ok === false || /^no\b/i.test(p.a.x);
+    if (!isYes && !isNo) continue;
+    for (const [gName] of G) {
+      const gn = norm(gName);
+      if (gn.length >= 3 && qn.includes(gn)) {
+        const key = (isYes ? 'keep:' : 'drop:') + gName;
+        if (seen.has(key)) continue;
+        const targets = L.filter(i => isYes ? (i.g !== gName && !crossed[i.n]) : (i.g === gName && !crossed[i.n]));
+        if (targets.length) {
+          seen.add(key);
+          suggs.push({
+            label: isYes ? `✨ Tieni solo "${gName}" (-${targets.length})` : `✂️ Escludi "${gName}" (-${targets.length})`,
+            names: targets.map(i => i.n)
+          });
+        }
+      }
+    }
+  }
+  return suggs.slice(-3);
+}
+
 async function board() {
   await ensureCat(cat());
-  const L = lst(cat());
+  const c = cat();
+  const L = lst(c);
+  const G = groups(c);
   let q = '';
   let only = false;
   let v = [];
   let gs = '';
+  let smartList = [];
   const o = document.createElement('div');
   o.className = 'bd';
-  o.innerHTML = `<div class="top"><button class="ghost sm" data-x="c">✕</button><b>📋 Candidati</b><button class="ghost sm" data-x="f">Tutti</button></div>
-    <div class="row" style="padding:8px 14px"><input id="bq" placeholder="🔍 Cerca…">${groups(cat()).length ? '<button class="ghost sm" data-x="g">🧩</button>' : ''}<button class="ghost sm" data-x="r">↺</button></div>
+  o.innerHTML = `<div class="top">
+      <button class="ghost sm" data-x="c">✕</button>
+      <b>📋 Candidati</b>
+      <span class="row">
+        <button class="ghost sm" data-x="u" title="Annulla ultima azione">↩️</button>
+        <button class="ghost sm" data-x="f">Tutti</button>
+      </span>
+    </div>
+    <div id="bsm"></div>
+    <div class="row" style="padding:8px 14px">
+      <input id="bq" placeholder="🔍 Cerca…">
+      ${G.length ? '<button class="ghost sm" data-x="g">🧩</button>' : ''}
+      <button class="ghost sm" data-x="r" title="Ripristina tutti">↺</button>
+    </div>
+    <div id="bgrp" style="padding:0 14px 4px"></div>
     <div id="bn" class="wt" style="padding:0 14px"></div>
     <div id="bl" class="list" style="padding:6px 14px 24px;overflow:auto;flex:1"></div>`;
   document.body.appendChild(o);
   const bl = o.querySelector('#bl');
   const bn = o.querySelector('#bn');
-  const count = () => { bn.textContent = (L.length - Object.keys(crossed).length) + ' candidati rimasti su ' + L.length; };
+  const bsm = o.querySelector('#bsm');
+  const bgrp = o.querySelector('#bgrp');
+
+  const pushUndo = () => {
+    undoStack.push({ ...crossed });
+    if (undoStack.length > 25) undoStack.shift();
+  };
+
+  const count = () => {
+    bn.textContent = (L.length - Object.keys(crossed).length) + ' candidati rimasti su ' + L.length;
+    smartList = getSmartSuggestions(L, G);
+    bsm.innerHTML = smartList.length
+      ? `<div class="smart-bar">${smartList.map((s, i) => `<button class="smart-chip" data-x="sm" data-i="${i}">${esc(s.label)}</button>`).join('')}</div>`
+      : '';
+    bgrp.innerHTML = gs
+      ? `<div class="row"><button class="ghost sm" style="flex:1" data-x="xg">✂️ Depenna tutto "${esc(gs)}"</button><button class="ghost sm" style="flex:1" data-x="kg">✨ Tieni solo "${esc(gs)}"</button></div>`
+      : '';
+  };
+
   const draw = () => {
     const s = norm(q.trim());
-    v = L.filter(i => (!s || i.s.includes(s)) && (!gs || i.g === gs) && (!only || !crossed[i.n]));
+    v = L.filter(i => (!s || fuzzyMatch(i.s, s)) && (!gs || i.g === gs) && (!only || !crossed[i.n]));
     fillList(bl, v, (i, x) => `<div class="it-wrap">
       <button class="it ${crossed[i.n] ? 'x' : ''}" data-x="t" data-i="${x}"><span>${i.e}</span><b>${esc(i.n)}</b></button>
       <button class="info-btn" data-x="w" data-n="${esc(i.n)}" title="Info Wikipedia">ℹ️</button>
     </div>`);
     count();
   };
+
   o.addEventListener('click', e => {
     const b = e.target.closest('[data-x]');
     if (!b) return;
     const k = b.dataset.x;
     if (k === 'c') { if (bl._off) bl._off(); o.remove(); }
     else if (k === 'f') { only = !only; b.textContent = only ? 'Rimasti' : 'Tutti'; draw(); }
-    else if (k === 'g') groupPicker(cat(), gs, x => { gs = x; b.textContent = gs ? '🧩 ' + gs : '🧩'; draw(); });
-    else if (k === 'r') ask('Rimettere tutti in gioco?', () => { crossed = {}; save(); draw(); }, null, 'Sì');
-    else if (k === 'w') showWikiInfo(b.dataset.n);
+    else if (k === 'g') groupPicker(c, gs, x => { gs = x; b.textContent = gs ? '🧩 ' + gs : '🧩'; draw(); });
+    else if (k === 'r') ask('Rimettere tutti in gioco?', () => { pushUndo(); crossed = {}; save(); draw(); }, null, 'Sì');
+    else if (k === 'u') {
+      if (!undoStack.length) return toast('Niente da annullare');
+      crossed = undoStack.pop();
+      save();
+      draw();
+    } else if (k === 'xg' && gs) {
+      pushUndo();
+      L.forEach(i => { if (i.g === gs) crossed[i.n] = 1; });
+      save();
+      draw();
+    } else if (k === 'kg' && gs) {
+      pushUndo();
+      L.forEach(i => { if (i.g !== gs) crossed[i.n] = 1; });
+      save();
+      draw();
+    } else if (k === 'sm') {
+      const s = smartList[b.dataset.i];
+      if (!s) return;
+      pushUndo();
+      s.names.forEach(n => { crossed[n] = 1; });
+      save();
+      draw();
+    } else if (k === 'w') showWikiInfo(b.dataset.n);
     else if (k === 't') {
+      pushUndo();
       const n = v[b.dataset.i].n;
       if (crossed[n]) delete crossed[n];
       else crossed[n] = 1;
@@ -1115,6 +1492,7 @@ function leave() {
   st = null;
   secret = null;
   crossed = {};
+  undoStack = [];
   notes = '';
   code = '';
   host = false;
@@ -1124,6 +1502,8 @@ function leave() {
   ui.q = '';
   ui.g = '';
   ui.on = true;
+  ui.quote = null;
+  ui.pres = {};
   stopTitleFlash();
   for (let i = CATS.length; i--;) if (CATS[i].tmp) CATS.splice(i, 1);
   try { localStorage.removeItem('ind'); } catch (e) {}
@@ -1150,6 +1530,8 @@ app.addEventListener('click', async e => {
   const d = b.dataset;
   switch (d.a) {
     case 'new': newGame(d.k); break;
+    case 'mix': openMixPicker(keys => newGame('mix', keys)); break;
+    case 'av': openAvatarPicker(); break;
     case 'code': {
       const c = val('cd').toLowerCase();
       if (c) { code = c; location.hash = c; joinGame(); }
@@ -1158,8 +1540,33 @@ app.addEventListener('click', async e => {
     case 'join': joinGame(); break;
     case 'set': settings(); break;
     case 'cc': customCat(); break;
+    case 'savetmp': {
+      const c = cat();
+      if (c && c.tmp) {
+        c.tmp = 0;
+        c.custom = 1;
+        saveCustomCats();
+        toast('Categoria salvata tra le tue!');
+        app.dataset.s = '';
+        render();
+      }
+      break;
+    }
     case 'chcat': openCatSwitcher(); break;
     case 'wiki': showWikiInfo(d.n); break;
+    case 'blur':
+      ui.blurSec = !ui.blurSec;
+      if (app.dataset.s === 'lobby') paintLobby();
+      else if (app.dataset.s === 'game') paintHeader();
+      break;
+    case 'qt':
+      ui.quote = { w: d.w, x: d.x };
+      paintQuoteBar();
+      break;
+    case 'noqt':
+      ui.quote = null;
+      paintQuoteBar();
+      break;
     case 'reconn':
       if (R) { R.reconnect(); resync(); toast('Riconnessione in corso…'); }
       else connect();
@@ -1178,11 +1585,17 @@ app.addEventListener('click', async e => {
       b.classList.add('s');
       paintLobby();
       save();
+      hydrateSecretImage(secret, () => { if (app.dataset.s === 'lobby') paintLobby(); save(); });
       break;
     case 'custom': {
       const n = val('cn');
       const em = val('ce');
-      if (n) { secret = { e: em || '✨', n }; paintLobby(); save(); }
+      if (n) {
+        secret = { e: em || '✨', n };
+        paintLobby();
+        save();
+        hydrateSecretImage(secret, () => { if (app.dataset.s === 'lobby') paintLobby(); save(); });
+      }
       break;
     }
     case 'sort':
@@ -1213,13 +1626,27 @@ app.addEventListener('click', async e => {
     case 'edit': ui.dr = null; paintGame(true); break;
     case 'send': {
       const dr = ui.dr;
-      if (dr) { ui.dr = null; ui.dx = ''; act({ t: 'ask', k: dr.k, x: dr.x }); }
+      if (dr) {
+        const qt = ui.quote;
+        ui.dr = null;
+        ui.dx = '';
+        ui.quote = null;
+        act({ t: 'ask', k: dr.k, x: dr.x, qt });
+      }
       break;
     }
     case 'qa': act({ t: 'ans', x: d.x }); break;
     case 'ans': { const x = val('ax'); if (x) act({ t: 'ans', x }); break; }
     case 'ga': act({ t: 'ans', x: d.v === '1' ? 'Sì, giusto! 🎉' : 'No', ok: d.v === '1' }); break;
-    case 'chat': { const x = val('cx'); if (x) act({ t: 'c', x, id: me + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) }); break; }
+    case 'chat': {
+      const x = val('cx');
+      if (x) {
+        const qt = ui.quote;
+        ui.quote = null;
+        act({ t: 'c', x, qt, id: me + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) });
+      }
+      break;
+    }
     case 'again': act({ t: 're', rs: serie() ? 1 : 0 }); break;
     case 'back': back(); break;
   }
@@ -1266,6 +1693,7 @@ try {
   const s = JSON.parse(localStorage.getItem('ind') || 'null');
   if (s && s.st && (!code || code === s.code)) {
     ({ me, name, code, host, st, secret } = s);
+    if (s.avatar) avatar = s.avatar;
     crossed = s.cr || {};
     notes = s.nt || '';
     if (s.cu) CATS.push({ k: s.cu.k, n: s.cu.n, e: s.cu.e, raw: [s.cu.i], tmp: 1 });
