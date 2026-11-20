@@ -837,22 +837,22 @@ function getQaPairs() {
 }
 
 function refreshScratchpad() {
-  const sp = $('#sp-qa');
-  if (!sp) return;
-  const flt = sp.dataset.f || 'all';
-  const pairs = getQaPairs().filter(p => flt === 'all' || (flt === 'me' ? p.f === me : p.f !== me));
-  if (!pairs.length) {
-    sp.innerHTML = '<p class="wt">Nessuna domanda registrata ancora.</p>';
-    return;
-  }
-  sp.innerHTML = pairs.map((p, idx) => {
-    const aTxt = p.a ? p.a.x : 'In attesa…';
-    const cls = p.a ? (p.a.ok === true || /^s[iì]\b/i.test(p.a.x) ? 'yes' : (p.a.ok === false || /^no\b/i.test(p.a.x) ? 'no' : '')) : '';
-    return `<div class="sp-row">
-      <div class="sp-q"><small style="color:var(--mut)">#${idx + 1} · ${esc(who(p.f))} (${p.k === 'g' ? '🎯' : '❓'})</small><br>${esc(p.q)}</div>
-      <div class="sp-a ${cls}">↳ ${esc(aTxt)}</div>
-    </div>`;
-  }).join('');
+  document.querySelectorAll('#sp-qa,#dsp-qa').forEach(sp => {
+    const flt = sp.dataset.f || 'all';
+    const pairs = getQaPairs().filter(p => flt === 'all' || (flt === 'me' ? p.f === me : p.f !== me));
+    if (!pairs.length) {
+      sp.innerHTML = '<p class="wt">Nessuna domanda registrata ancora.</p>';
+      return;
+    }
+    sp.innerHTML = pairs.map((p, idx) => {
+      const aTxt = p.a ? p.a.x : 'In attesa…';
+      const cls = p.a ? (p.a.ok === true || /^s[iì]\b/i.test(p.a.x) ? 'yes' : (p.a.ok === false || /^no\b/i.test(p.a.x) ? 'no' : '')) : '';
+      return `<div class="sp-row">
+        <div class="sp-q"><small style="color:var(--mut)">#${idx + 1} · ${esc(who(p.f))} (${p.k === 'g' ? '🎯' : '❓'})</small><br>${esc(p.q)}</div>
+        <div class="sp-a ${cls}">↳ ${esc(aTxt)}</div>
+      </div>`;
+    }).join('');
+  });
 }
 
 function openScratchpad() {
@@ -1014,7 +1014,10 @@ const V = {
   home: () => `<div class="page">
     <div style="display:flex;justify-content:flex-end"><button class="ghost sm" data-a="set">⚙️</button></div>
     <div class="hero" style="padding-top:0"><div class="logo">🔮</div><h1>Indovina!</h1><p>Scegli un segreto, fai domande e scopri quello dell’altro.</p></div>
-    ${nameBox()}
+    <div class="home-top">
+      ${nameBox()}
+      <div class="card desk-only"><label>Hai un codice invito?</label><div class="row"><input id="cd-d" maxlength="10" placeholder="Codice invito"><button class="btn" data-a="coded">Entra</button></div></div>
+    </div>
     <div class="row" style="justify-content:space-between;margin-top:16px">
       <h3 style="margin:0 4px">Crea una partita</h3>
       <button class="ghost sm" data-a="mix">🔀 Mix categorie</button>
@@ -1022,8 +1025,10 @@ const V = {
     ${ui.idxErr ? `<p class="err">${esc(ui.idxErr)}</p>` : (!ui.idxLoaded && !CATS.length ? '<p class="wt">⏳ Caricamento categorie…</p>' : '')}
     <div class="grid" style="margin-top:8px">${CATS.map(c => `<button class="cat" data-a="new" data-k="${c.k}"><span>${c.e}</span><b>${esc(c.n)}</b><small>${cnt(c)} voci</small></button>`).join('')}</div>
     <button class="ghost" style="width:100%;margin-top:10px" data-a="cc">＋ Crea o importa categoria</button>
-    <h3>Hai un codice?</h3>
-    <div class="row"><input id="cd" maxlength="10" placeholder="Codice invito"><button class="btn" data-a="code">Entra</button></div>
+    <div class="mob-only">
+      <h3>Hai un codice?</h3>
+      <div class="row"><input id="cd" maxlength="10" placeholder="Codice invito"><button class="btn" data-a="code">Entra</button></div>
+    </div>
   </div>`,
 
   join: () => `<div class="page">
@@ -1043,30 +1048,60 @@ const V = {
       <button class="top-cat ${host ? 'can-edit' : ''}" data-a="${host ? 'chcat' : ''}" title="${host ? 'Cambia categoria' : ''}">${c.e} ${esc(c.n)}${host ? ' ▾' : ''}</button>
       <span class="row"><button class="ghost sm" data-a="set">⚙️</button><button class="ghost sm" data-a="inv">🔗 Invita</button></span>
     </div>
-    <div class="page">
-      <div class="card" id="plr"></div>
-      ${c.tmp ? `<button class="ghost" style="width:100%;margin-top:8px" data-a="savetmp">💾 Salva questa categoria tra le tue</button>` : ''}
-      <h3>Modalità</h3><div class="card" id="mdr"></div>
-      <h3>Il tuo segreto</h3><div id="sel"></div>
-      <div class="row"><input id="q" placeholder="🔍 Cerca (anche con errori)…" value="${esc(ui.q)}"><button class="ghost sm" data-a="sort">${ui.asc ? 'A→Z' : 'Z→A'}</button></div>
-      <div id="gfr" style="margin-top:8px">${gbtn()}</div>
-      <div id="list" class="list"></div>
-      <details><summary>＋ Non c’è? Aggiungi il tuo</summary><div class="row"><input id="ce" class="emo" maxlength="4" placeholder="✨"><input id="cn" maxlength="50" placeholder="Nome"><button class="btn" data-a="custom">Ok</button></div></details>
+    <div class="page" style="display:flex;flex-direction:column">
+      <div class="lobby-wrap">
+        <div class="lobby-side">
+          <div class="card" id="plr"></div>
+          ${c.tmp ? `<button class="ghost" style="width:100%;margin-top:8px" data-a="savetmp">💾 Salva questa categoria tra le tue</button>` : ''}
+          <h3>Modalità</h3><div class="card" id="mdr"></div>
+          <h3>Il tuo segreto</h3><div id="sel"></div>
+        </div>
+        <div class="lobby-main">
+          <div class="row"><input id="q" placeholder="🔍 Cerca (anche con errori)…" value="${esc(ui.q)}"><button class="ghost sm" data-a="sort">${ui.asc ? 'A→Z' : 'Z→A'}</button></div>
+          <div id="gfr" style="margin-top:8px">${gbtn()}</div>
+          <div id="list" class="list"></div>
+          <details><summary>＋ Non c’è? Aggiungi il tuo</summary><div class="row"><input id="ce" class="emo" maxlength="4" placeholder="✨"><input id="cn" maxlength="50" placeholder="Nome"><button class="btn" data-a="custom">Ok</button></div></details>
+        </div>
+      </div>
     </div>
     <div class="bar" id="rdb"></div>`;
   },
 
   game: () => `${netBanner()}<div id="hd" class="top"></div>
-    <div id="feed" class="feed"></div>
-    <div id="act" class="act"></div>
-    <div id="qtbar"></div>
-    <div id="ty" class="ty"></div>
-    <div class="chat">
-      ${st.mode === 'b' ? '<button class="ghost sm" data-a="board" title="Lista candidati">📋</button>' : ''}
-      <button class="ghost sm" data-a="notes" title="Appunti e Q&A">📝</button>
-      <input id="cx" maxlength="${MAX_MSG}" placeholder="💬 Chat libera (swipe → per citare)…">
-      <button id="mic" class="ghost sm aud-btn" data-a="mic" title="Registra vocale (max 15s)">🎤</button>
-      <button class="btn" data-a="chat">➤</button>
+    <div class="game-wrap">
+      <div class="game-main">
+        <div id="feed" class="feed"></div>
+        <div id="act" class="act"></div>
+        <div id="qtbar"></div>
+        <div id="ty" class="ty"></div>
+        <div class="chat">
+          ${st.mode === 'b' ? '<button class="ghost sm" data-a="board" title="Lista candidati">📋</button>' : ''}
+          <button class="ghost sm mob-only" data-a="notes" title="Appunti e Q&A">📝</button>
+          <input id="cx" maxlength="${MAX_MSG}" placeholder="💬 Chat libera (swipe → per citare)…">
+          <button id="mic" class="ghost sm aud-btn" data-a="mic" title="Registra vocale (max 15s)">🎤</button>
+          <button class="btn" data-a="chat">➤</button>
+        </div>
+      </div>
+      <aside class="desk-side">
+        <div id="dsec"></div>
+        <div class="row" style="justify-content:space-between">
+          <b>📝 Appunti e Q&amp;A</b>
+          <span class="row">
+            ${st.mode === 'b' ? '<button class="ghost sm" data-a="board" title="Lista candidati">📋 Candidati</button>' : ''}
+            <button class="ghost sm" data-a="dcp" title="Copia appunti">📋</button>
+          </span>
+        </div>
+        <div class="row">
+          <button class="ghost sm on" data-a="df" data-v="all" style="flex:1">Tutte</button>
+          <button class="ghost sm" data-a="df" data-v="me" style="flex:1">Le mie</button>
+          <button class="ghost sm" data-a="df" data-v="you" style="flex:1">Avv.</button>
+        </div>
+        <div id="dsp-qa" class="sp-list" data-f="all"></div>
+        <div>
+          <label for="dsp-notes" style="font-size:13px">Deduzioni</label>
+          <textarea id="dsp-notes" rows="4" placeholder="Scrivi qui indizi o ipotesi…">${esc(notes)}</textarea>
+        </div>
+      </aside>
     </div>`,
 
   end: () => {
@@ -1074,7 +1109,7 @@ const V = {
     const mine = w === me;
     const [a, b] = st.order;
     const sw = serie();
-    return `${netBanner()}<div class="page">
+    return `${netBanner()}<div class="page"><div class="end-wrap">
       <div class="hero">
         <div class="logo">${mine ? '🏆' : '😅'}</div>
         <h1>${mine ? 'Hai vinto!' : esc(pn(w)) + ' ha vinto!'}</h1>
@@ -1089,7 +1124,7 @@ const V = {
       }).join('')}</div>
       <div style="margin-top:16px"><button class="btn big" data-a="again">${sw ? '🔁 Nuova serie' : '🔁 Rivincita'}</button></div>
       <div style="margin-top:10px"><button class="ghost" style="width:100%" data-a="back">🏠 Torna alla home</button></div>
-    </div>`;
+    </div></div>`;
   }
 };
 
@@ -1175,6 +1210,11 @@ function paintHeader() {
     <span class="pill">R${st.rd}${st.sc && Object.keys(st.sc).length ? ' · ' + wins(me) + '–' + wins(other()) : ''}</span>
     <div style="text-align:center;line-height:1.15"><b style="font-size:14px">${myTurn ? '🟢 Tocca a te' : '⏳ ' + esc(pn(st.order[st.turn]))}</b><span class="pres">${oppPresence()}</span></div>
     <span class="pill sec ${ui.blurSec ? 'blur' : ''}" data-a="blur" title="Tocca per sfocare il segreto">${secret ? secret.e + ' ' + esc(secret.n) : ''}</span>`;
+  const ds = $('#dsec');
+  if (ds && secret) {
+    const media = secret.img ? `<img class="sec-img" src="${esc(secret.img)}" alt="">` : `<span class="big">${secret.e}</span>`;
+    ds.innerHTML = `<div class="card sel ${ui.blurSec ? 'blur' : ''}" style="margin:0;padding:10px" data-a="blur" title="Tocca per sfocare">${media}<div style="min-width:0"><small style="color:var(--mut);font-weight:800">Il tuo segreto</small><b style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(secret.n)}</b></div></div>`;
+  }
 }
 
 function paintQuoteBar() {
@@ -1274,7 +1314,7 @@ function render() {
     if (e) e.focus();
   }
   if (s === 'lobby') { paintLobby(); drawList(); }
-  if (s === 'game') paintGame(true);
+  if (s === 'game') { paintGame(true); refreshScratchpad(); }
   net();
 }
 
@@ -1681,6 +1721,23 @@ app.addEventListener('click', async e => {
       if (c) { code = c; location.hash = c; joinGame(); }
       break;
     }
+    case 'coded': {
+      const c = val('cd-d').toLowerCase();
+      if (c) { code = c; location.hash = c; joinGame(); }
+      break;
+    }
+    case 'df': {
+      app.querySelectorAll('[data-a="df"]').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      const sp = $('#dsp-qa');
+      if (sp) { sp.dataset.f = d.v; refreshScratchpad(); }
+      break;
+    }
+    case 'dcp': {
+      const txt = getQaPairs().map((p, i) => `${i + 1}. [${who(p.f)}] ${p.q} -> ${p.a ? p.a.x : '...'}`).join('\n') + (notes ? '\n\nNote:\n' + notes : '');
+      try { await navigator.clipboard.writeText(txt); toast('Appunti copiati!'); } catch (err) {}
+      break;
+    }
     case 'join': joinGame(); break;
     case 'set': settings(); break;
     case 'cc': customCat(); break;
@@ -1801,6 +1858,7 @@ app.addEventListener('click', async e => {
 app.addEventListener('input', e => {
   const id = e.target.id;
   if (id === 'q') { ui.q = e.target.value; drawList(); }
+  if (id === 'dsp-notes') { notes = e.target.value; save(); }
   if ((id === 'cx' || id === 'ix' || id === 'ax') && Date.now() - lastTy > 2000) {
     lastTy = Date.now();
     send({ t: 'ty' });
@@ -1809,7 +1867,7 @@ app.addEventListener('input', e => {
 
 app.addEventListener('keydown', e => {
   if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
-  const m = { cx: 'chat', ix: 'ask', ax: 'ans', cd: 'code', nm: null, cn: 'custom' }[e.target.id];
+  const m = { cx: 'chat', ix: 'ask', ax: 'ans', cd: 'code', 'cd-d': 'coded', nm: null, cn: 'custom' }[e.target.id];
   if (m) {
     const b = app.querySelector(`[data-a="${m}"]`);
     if (b) b.click();
