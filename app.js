@@ -190,6 +190,10 @@ let hbT = 0;
 let lastTy = 0;
 let flashT = 0;
 let audioCtx = null;
+let rec = null;
+let recChunks = [];
+let recStart = 0;
+let recTimer = 0;
 
 const ui = {
   q: '', g: '', dr: null, dx: '', asc: true, mode: 'q', err: '',
@@ -293,6 +297,38 @@ function playChime() {
     };
     playTone(587.33, now, 0.14);
     playTone(880, now + 0.11, 0.22);
+  } catch (e) {}
+}
+
+function playSfx(kind) {
+  if (!TH.s) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!audioCtx) audioCtx = new Ctx();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const now = audioCtx.currentTime;
+    const tone = (freq, start, dur, type = 'sine', vol = 0.13) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, start);
+      g.gain.setValueAtTime(0.001, start);
+      g.gain.exponentialRampToValueAtTime(vol, start + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, start + dur);
+      o.connect(g);
+      g.connect(audioCtx.destination);
+      o.start(start);
+      o.stop(start + dur);
+    };
+    if (kind === 'guess') {
+      [220, 260, 310, 370, 440].forEach((f, i) => tone(f, now + i * 0.07, 0.09, 'triangle', 0.11));
+    } else if (kind === 'wrong') {
+      tone(190, now, 0.22, 'sawtooth', 0.11);
+      tone(145, now + 0.16, 0.30, 'sawtooth', 0.11);
+    } else if (kind === 'win') {
+      [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tone(f, now + i * 0.11, i === 3 ? 0.42 : 0.16, 'triangle', 0.14));
+    }
   } catch (e) {}
 }
 
@@ -444,7 +480,7 @@ function buildSnapLog(log) {
   const qa = [];
   const chat = [];
   log.forEach((entry, idx) => {
-    if (entry.k === 'c') chat.push([idx, entry]);
+    if (entry.k === 'c') chat.push([idx, entry.aud ? { ...entry, aud: null, x: entry.x || '🎤 Messaggio vocale' } : entry]);
     else qa.push([idx, entry]);
   });
   const keepChat = chat.slice(-20);
@@ -579,7 +615,7 @@ async function connect() {
       if (catLost()) send({ t: 'cq' });
       if (st.ph === 'lobby') {
         if (st.pl[me]) send({ t: 'rd', v: st.pl[me].r });
-        if (host) send({ t: 'md', m: st.mode, bo: st.bo });
+        if (host) send({ t: 'md', m: st.mode, bo: st.bo, sn: !!st.sn });
       }
       if (app.dataset.s === 'lobby') paintLobby();
       else if (app.dataset.s === 'game') paintHeader();
@@ -630,6 +666,7 @@ function apply(m) {
       if (f !== st.order[0] || st.ph !== 'lobby') return;
       st.mode = m.m;
       st.bo = m.bo;
+      st.sn = !!m.sn;
       break;
     case 'cat':
       if (f !== st.order[0] || st.ph !== 'lobby') return;
@@ -680,6 +717,7 @@ function apply(m) {
     case 'ask':
       st.pend = { k: m.k, x: m.x, f, qt: m.qt || null };
       st.log.push({ k: m.k, f, x: m.x, qt: m.qt || null });
+      if (m.k === 'g') playSfx('guess');
       if (f !== me) notifyTurn(m.k === 'g' ? 'Tentativo!' : 'Nuova domanda!');
       break;
     case 'ans':
@@ -690,12 +728,15 @@ function apply(m) {
         st.sc = st.sc || {};
         st.sc[st.win] = wins(st.win) + 1;
         if (secret) act({ t: 'rv', s: secret });
+        playSfx('win');
         if (st.win === me) launchConfetti();
         if (f !== me) notifyTurn(st.win === me ? 'Hai vinto!' : 'Partita finita!');
       } else {
+        const wasWrongGuess = st.pend && st.pend.k === 'g' && m.ok === false;
         st.pend = null;
         st.turn = 1 - st.turn;
         if (st.turn === 0) st.rd++;
+        if (wasWrongGuess) playSfx('wrong');
         if (st.order[st.turn] === me) notifyTurn('Tocca a te!');
       }
       break;
@@ -704,7 +745,7 @@ function apply(m) {
         if (seenChat.has(m.id)) return;
         seenChat.add(m.id);
       }
-      st.log.push({ k: 'c', f, x: m.x, id: m.id, qt: m.qt || null });
+      st.log.push({ k: 'c', f, x: m.x, id: m.id, qt: m.qt || null, aud: m.aud || null, dur: m.dur || 0 });
       break;
     case 'rv':
       st.rv[f] = m.s;
@@ -762,6 +803,7 @@ function newGame(k, mixKeys) {
     q: 0,
     mode: 'n',
     bo: 0,
+    sn: false,
     sc: {}
   };
   ensureCat(cat());
@@ -1022,7 +1064,8 @@ const V = {
     <div class="chat">
       ${st.mode === 'b' ? '<button class="ghost sm" data-a="board" title="Lista candidati">📋</button>' : ''}
       <button class="ghost sm" data-a="notes" title="Appunti e Q&A">📝</button>
-      <input id="cx" maxlength="${MAX_MSG}" placeholder="💬 Chat libera (tocca un msg per citarlo)…">
+      <input id="cx" maxlength="${MAX_MSG}" placeholder="💬 Chat libera (swipe → per citare)…">
+      <button id="mic" class="ghost sm aud-btn" data-a="mic" title="Registra vocale (max 15s)">🎤</button>
       <button class="btn" data-a="chat">➤</button>
     </div>`,
 
@@ -1111,6 +1154,7 @@ function paintLobby() {
     </div>
     <p style="font-size:13px">${st.mode === 'b' ? 'Lista candidati con depennamento rapido per gruppo e suggerimenti smart.' : 'Solo domande, tentativi e blocco appunti automatico.'}</p>
     <div class="row" style="flex-wrap:wrap;margin-top:6px"><small style="font-weight:800">Serie:</small>${[0, 3, 5].map(b => `<button class="ghost sm ${(st.bo || 0) === b ? 'on' : ''}" data-a="bo" data-b="${b}" ${h}>${b ? 'al meglio di ' + b : '∞ partite'}</button>`).join('')}</div>
+    <div class="row" style="flex-wrap:wrap;margin-top:6px"><small style="font-weight:800">Risposte:</small><button class="ghost sm ${!st.sn ? 'on' : ''}" data-a="sn" data-v="0" ${h}>💬 Libere</button><button class="ghost sm ${st.sn ? 'on' : ''}" data-a="sn" data-v="1" ${h}>🔒 Solo Sì/No/Forse</button></div>
     ${host ? '<p style="font-size:12px;margin-top:6px">Tocca il nome della categoria in alto per cambiarla o creare un Mix.</p>' : '<p style="font-size:13px">Le modalità e la categoria le sceglie chi ha creato la partita.</p>'}`;
   if (secret) {
     const media = secret.img ? `<img class="sec-img" src="${esc(secret.img)}" alt="">` : `<span class="big">${secret.e}</span>`;
@@ -1164,7 +1208,10 @@ function paintGame(full) {
   fd.innerHTML = cards.map((c, idx) => {
     const qHtml = c.qt ? `<div class="qt">↩️ ${esc(c.qt.w)}: ${esc(c.qt.x)}</div>` : '';
     if (c.k === 'c') {
-      return `<div class="b ${c.f === me ? 'me' : 'you'}" data-a="qt" data-w="${esc(who(c.f))}" data-x="${esc(c.x.slice(0, 80))}">${qHtml}<small>${esc(who(c.f))}</small>${esc(c.x)}</div>`;
+      const body = c.aud
+        ? `<div class="aud-msg"><small>${esc(who(c.f))} · 🎤 ${c.dur || ''}s</small><audio controls preload="metadata" src="${c.aud}"></audio></div>`
+        : `<small>${esc(who(c.f))}</small>${esc(c.x)}`;
+      return `<div class="b ${c.f === me ? 'me' : 'you'}" data-a="qt" data-w="${esc(who(c.f))}" data-x="${esc((c.x || '🎤 Vocale').slice(0, 80))}">${qHtml}${body}</div>`;
     }
     if (c.k === 'o') return `<div class="ev">${esc(c.x)}</div>`;
     return `<div class="qa ${c.f === me ? 'me' : 'you'}" data-a="qt" data-w="${esc(who(c.f))}" data-x="${esc(c.x.slice(0, 80))}"><div class="qq">${qHtml}<small>${esc(who(c.f))} · ${c.k === 'q' ? '❓ Domanda' : '🎯 Tentativo'}</small>${esc(c.x)}</div><div class="qr ${c.a ? (c.a.ok === true ? 'yes' : c.a.ok === false ? 'no' : 'rp') : 'pn'}">${c.a ? esc(c.a.x) : '⏳ In attesa della risposta…'}</div></div>`;
@@ -1181,7 +1228,7 @@ function paintGame(full) {
     h = p.k === 'q'
       ? `<div><b>${esc(pn(p.f))}</b> chiede: “${esc(p.x)}”</div>
          <div class="row c"><button class="btn ok" data-a="qa" data-x="Sì">Sì</button><button class="btn no" data-a="qa" data-x="No">No</button><button class="ghost" data-a="qa" data-x="Forse">Forse</button></div>
-         <div class="row"><input id="ax" maxlength="${MAX_MSG}" placeholder="…o rispondi a mano"><button class="btn" data-a="ans">➤</button></div>`
+         ${st.sn ? '' : `<div class="row"><input id="ax" maxlength="${MAX_MSG}" placeholder="…o rispondi a mano"><button class="btn" data-a="ans">➤</button></div>`}`
       : `<div><b>${esc(pn(p.f))}</b> prova a indovinare: <b>“${esc(p.x)}”</b><br>È il tuo segreto?</div>
          <div class="row c"><button class="btn ok" data-a="ga" data-v="1">Sì, hai indovinato!</button><button class="btn no" data-a="ga" data-v="0">No</button></div>`;
   } else if (p) {
@@ -1367,6 +1414,7 @@ async function board() {
   const G = groups(c);
   let q = '';
   let only = false;
+  let gridMode = false;
   let v = [];
   let gs = '';
   let smartList = [];
@@ -1376,6 +1424,7 @@ async function board() {
       <button class="ghost sm" data-x="c">✕</button>
       <b>📋 Candidati</b>
       <span class="row">
+        <button class="ghost sm" data-x="v" title="Vista griglia / lista">⊞</button>
         <button class="ghost sm" data-x="u" title="Annulla ultima azione">↩️</button>
         <button class="ghost sm" data-x="f">Tutti</button>
       </span>
@@ -1395,6 +1444,20 @@ async function board() {
   const bsm = o.querySelector('#bsm');
   const bgrp = o.querySelector('#bgrp');
 
+  const imgIO = new IntersectionObserver(es => {
+    for (const en of es) {
+      if (!en.isIntersecting) continue;
+      const box = en.target;
+      imgIO.unobserve(box);
+      const title = box.dataset.img;
+      if (!title) continue;
+      fetchWikiSummary(title).then(d => {
+        const src = d && d.thumbnail && d.thumbnail.source;
+        if (src && box.isConnected) box.innerHTML = `<img src="${esc(src)}" alt="" loading="lazy">`;
+      });
+    }
+  }, { root: bl, rootMargin: '120px' });
+
   const pushUndo = () => {
     undoStack.push({ ...crossed });
     if (undoStack.length > 25) undoStack.shift();
@@ -1411,21 +1474,47 @@ async function board() {
       : '';
   };
 
+  const observeGridImgs = () => {
+    if (!gridMode) return;
+    bl.querySelectorAll('[data-img]').forEach(el => {
+      const cached = WIKI_CACHE[el.dataset.img];
+      if (cached && cached.thumbnail && cached.thumbnail.source) {
+        el.innerHTML = `<img src="${esc(cached.thumbnail.source)}" alt="">`;
+      } else if (cached === undefined) {
+        imgIO.observe(el);
+      }
+    });
+  };
+
   const draw = () => {
     const s = norm(q.trim());
     v = L.filter(i => (!s || fuzzyMatch(i.s, s)) && (!gs || i.g === gs) && (!only || !crossed[i.n]));
-    fillList(bl, v, (i, x) => `<div class="it-wrap">
-      <button class="it ${crossed[i.n] ? 'x' : ''}" data-x="t" data-i="${x}"><span>${i.e}</span><b>${esc(i.n)}</b></button>
-      <button class="info-btn" data-x="w" data-n="${esc(i.n)}" title="Info Wikipedia">ℹ️</button>
-    </div>`);
+    bl.className = gridMode ? 'cgrid' : 'list';
+    if (gridMode) {
+      fillList(bl, v, (i, x) => `<div class="ctile ${crossed[i.n] ? 'x' : ''}" data-x="t" data-i="${x}">
+        <button class="ctile-info" data-x="w" data-n="${esc(i.n)}" title="Info Wikipedia">ℹ️</button>
+        <div class="ctile-media" data-img="${esc(i.n)}">${i.e}</div>
+        <b>${esc(i.n)}</b>
+      </div>`);
+      observeGridImgs();
+    } else {
+      fillList(bl, v, (i, x) => `<div class="it-wrap">
+        <button class="it ${crossed[i.n] ? 'x' : ''}" data-x="t" data-i="${x}"><span>${i.e}</span><b>${esc(i.n)}</b></button>
+        <button class="info-btn" data-x="w" data-n="${esc(i.n)}" title="Info Wikipedia">ℹ️</button>
+      </div>`);
+    }
     count();
   };
+
+  const mo = new MutationObserver(observeGridImgs);
+  mo.observe(bl, { childList: true });
 
   o.addEventListener('click', e => {
     const b = e.target.closest('[data-x]');
     if (!b) return;
     const k = b.dataset.x;
-    if (k === 'c') { if (bl._off) bl._off(); o.remove(); }
+    if (k === 'c') { if (bl._off) bl._off(); imgIO.disconnect(); mo.disconnect(); o.remove(); }
+    else if (k === 'v') { gridMode = !gridMode; b.textContent = gridMode ? '☰' : '⊞'; draw(); }
     else if (k === 'f') { only = !only; b.textContent = only ? 'Rimasti' : 'Tutti'; draw(); }
     else if (k === 'g') groupPicker(c, gs, x => { gs = x; b.textContent = gs ? '🧩 ' + gs : '🧩'; draw(); });
     else if (k === 'r') ask('Rimettere tutti in gioco?', () => { pushUndo(); crossed = {}; save(); draw(); }, null, 'Sì');
@@ -1451,8 +1540,10 @@ async function board() {
       s.names.forEach(n => { crossed[n] = 1; });
       save();
       draw();
-    } else if (k === 'w') showWikiInfo(b.dataset.n);
-    else if (k === 't') {
+    } else if (k === 'w') {
+      e.stopPropagation();
+      showWikiInfo(b.dataset.n);
+    } else if (k === 't') {
       pushUndo();
       const n = v[b.dataset.i].n;
       if (crossed[n]) delete crossed[n];
@@ -1464,6 +1555,59 @@ async function board() {
   });
   o.addEventListener('input', e => { if (e.target.id === 'bq') { q = e.target.value; draw(); } });
   draw();
+}
+
+
+async function toggleVoiceRec() {
+  const btn = $('#mic');
+  if (rec && rec.state === 'recording') {
+    clearTimeout(recTimer);
+    rec.stop();
+    return;
+  }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    return toast('Registrazione audio non supportata su questo browser');
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : (MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '');
+    rec = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 16000 } : undefined);
+    recChunks = [];
+    recStart = Date.now();
+    rec.ondataavailable = ev => { if (ev.data && ev.data.size) recChunks.push(ev.data); };
+    rec.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const mb = $('#mic');
+      if (mb) { mb.classList.remove('rec'); mb.textContent = '🎤'; }
+      const dur = Math.max(1, Math.round((Date.now() - recStart) / 1000));
+      const blob = new Blob(recChunks, { type: rec.mimeType || 'audio/webm' });
+      rec = null;
+      if (blob.size < 400) return;
+      if (blob.size > 110000) return toast('Vocale troppo pesante (max 15s)');
+      const fr = new FileReader();
+      fr.onload = () => {
+        const qt = ui.quote;
+        ui.quote = null;
+        act({
+          t: 'c',
+          x: '🎤 Messaggio vocale',
+          aud: fr.result,
+          dur,
+          qt,
+          id: me + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+        });
+      };
+      fr.readAsDataURL(blob);
+    };
+    rec.start();
+    if (btn) { btn.classList.add('rec'); btn.textContent = '⏹️'; }
+    toast('Registrazione vocale… (max 15s, tocca ⏹️ per inviare)');
+    recTimer = setTimeout(() => { if (rec && rec.state === 'recording') rec.stop(); }, 15000);
+  } catch (err) {
+    toast('Permesso microfono negato');
+  }
 }
 
 function ask(msg, yes, no, yl) {
@@ -1603,8 +1747,10 @@ app.addEventListener('click', async e => {
       drawList();
       b.textContent = ui.asc ? 'A→Z' : 'Z→A';
       break;
-    case 'md': if (host) act({ t: 'md', m: d.m, bo: st.bo || 0 }); break;
-    case 'bo': if (host) act({ t: 'md', m: st.mode || 'n', bo: +d.b }); break;
+    case 'md': if (host) act({ t: 'md', m: d.m, bo: st.bo || 0, sn: !!st.sn }); break;
+    case 'bo': if (host) act({ t: 'md', m: st.mode || 'n', bo: +d.b, sn: !!st.sn }); break;
+    case 'sn': if (host) act({ t: 'md', m: st.mode || 'n', bo: st.bo || 0, sn: d.v === '1' }); break;
+    case 'mic': toggleVoiceRec(); break;
     case 'ready': if (secret) act({ t: 'rd', v: st.pl[me].r ? 0 : 1 }); break;
     case 'board': board(); break;
     case 'notes': openScratchpad(); break;
@@ -1704,6 +1850,43 @@ try {
     localStorage.removeItem('ind');
   }
 } catch (e) {}
+
+
+let swEl = null;
+let swX = 0;
+let swY = 0;
+let swMoved = false;
+app.addEventListener('touchstart', e => {
+  const el = e.target.closest('.qa,.b');
+  if (!el || e.touches.length !== 1) return;
+  swEl = el;
+  swX = e.touches[0].clientX;
+  swY = e.touches[0].clientY;
+  swMoved = false;
+}, { passive: true });
+app.addEventListener('touchmove', e => {
+  if (!swEl || e.touches.length !== 1) return;
+  const dx = e.touches[0].clientX - swX;
+  const dy = Math.abs(e.touches[0].clientY - swY);
+  if (dx > 12 && dy < 35) {
+    swMoved = true;
+    swEl.style.transform = `translateX(${Math.min(dx, 64)}px)`;
+  }
+}, { passive: true });
+app.addEventListener('touchend', e => {
+  if (!swEl) return;
+  const dx = e.changedTouches[0].clientX - swX;
+  const el = swEl;
+  el.style.transform = '';
+  swEl = null;
+  if (swMoved && dx > 48 && el.dataset.w) {
+    ui.quote = { w: el.dataset.w, x: el.dataset.x };
+    paintQuoteBar();
+    try { if (navigator.vibrate) navigator.vibrate(25); } catch (err) {}
+    const inp = $('#cx');
+    if (inp) inp.focus();
+  }
+}, { passive: true });
 
 render();
 loadIndex();
